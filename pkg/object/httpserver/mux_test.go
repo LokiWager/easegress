@@ -666,3 +666,12 @@ func TestPrintHeader(t *testing.T) {
 		t.Fail()
 	}
 }
+
+func BenchmarkNewAccessLogFormatter(b *testing.B) {
+	format := "{{Method}} {{URI}} [{{ReqSize}}]"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = newAccessLogFormatter(format)
+	}
+}
