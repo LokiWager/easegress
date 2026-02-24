@@ -115,7 +115,7 @@ func (ss *HTTPSessionSticker) UpdateServers(servers []*Server) {
 	}
 
 	if len(servers) == 0 {
-		// TODO: consistentHash panics in this case, we need to handle it.
+		ss.consistentHash.Store(nil)
 		return
 	}
 
@@ -140,7 +140,12 @@ func (ss *HTTPSessionSticker) getServerByConsistentHash(req *httpprot.Request) *
 		return nil
 	}
 
-	m := ss.consistentHash.Load().LocateKey([]byte(cookie.Value))
+	ch := ss.consistentHash.Load()
+	if ch == nil {
+		return nil
+	}
+
+	m := ch.LocateKey([]byte(cookie.Value))
 	if m != nil {
 		return m.(hashMember).server
 	}
