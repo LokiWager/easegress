@@ -25,6 +25,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,6 +62,9 @@ type (
 		sessionCacheMgr   SessionCacheManager
 		connectionLimiter *Limiter
 		memberURL         func(string, string) (map[string]string, error)
+
+		sessionCache      map[string]*SessionInfo
+		sortedSessionKeys []string
 
 		// done is the channel for shutdowning this proxy.
 		done      chan struct{}
@@ -120,10 +124,12 @@ func newBroker(spec *Spec, store storage, muxMapper context.MuxMapper, memberURL
 		egName:    spec.EGName,
 		name:      spec.Name,
 		spec:      spec,
-		clients:   make(map[string]*Client),
-		memberURL: memberURL,
-		done:      make(chan struct{}),
-		muxMapper: muxMapper,
+		clients:           make(map[string]*Client),
+		memberURL:         memberURL,
+		done:              make(chan struct{}),
+		muxMapper:         muxMapper,
+		sessionCache:      make(map[string]*SessionInfo),
+		sortedSessionKeys: make([]string, 0),
 	}
 	pipelines, err := getPipelineMap(spec)
 	if err != nil {
@@ -245,6 +251,26 @@ func (b *Broker) watch(ch <-chan map[string]*string, closeFunc func()) {
 }
 
 func (b *Broker) processWatcherEvent(event map[string]*string, sync bool) {
+	b.Lock()
+	for k, v := range event {
+		clientID := strings.TrimPrefix(k, sessionStoreKey(""))
+		if v == nil {
+			delete(b.sessionCache, clientID)
+		} else {
+			session := &Session{}
+			err := session.decode(*v)
+			if err == nil {
+				b.sessionCache[clientID] = session.info
+			}
+		}
+	}
+	b.sortedSessionKeys = make([]string, 0, len(b.sessionCache))
+	for k := range b.sessionCache {
+		b.sortedSessionKeys = append(b.sortedSessionKeys, k)
+	}
+	sort.Strings(b.sortedSessionKeys)
+	b.Unlock()
+
 	sessMap := make(map[string]*SessionInfo)
 	for k, v := range event {
 		clientID := strings.TrimPrefix(k, sessionStoreKey(""))
@@ -752,15 +778,14 @@ func (b *Broker) httpGetAllSessionHandler(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	allSession, err := b.sessMgr.store.getPrefix(sessionStoreKey(""), false)
-	logger.SpanDebugf(span, "httpGetAllSessionHandler current total %v sessions, query %v, topic %v", len(allSession), []int{page, pageSize}, topic)
-	if err != nil {
-		logger.SpanErrorf(span, "get all sessions with prefix %v failed, %v", sessionStoreKey(""), err)
-		api.HandleAPIError(w, r, http.StatusInternalServerError, fmt.Errorf("get all sessions failed, %v", err))
-		return
-	}
+	b.RLock()
+	keys := b.sortedSessionKeys
+	sessions := b.sessionCache
 
-	res := b.queryAllSessions(allSession, len(query) != 0, page, pageSize, topic)
+	logger.SpanDebugf(span, "httpGetAllSessionHandler current total %v sessions, query %v, topic %v", len(sessions), []int{page, pageSize}, topic)
+
+	res := b.queryAllSessions(keys, sessions, len(query) != 0, page, pageSize, topic)
+	b.RUnlock()
 
 	jsonData, err := codectool.MarshalJSON(res)
 	if err != nil {
@@ -775,12 +800,12 @@ func (b *Broker) httpGetAllSessionHandler(w http.ResponseWriter, r *http.Request
 	}
 }
 
-func (b *Broker) queryAllSessions(allSession map[string]string, query bool, page, pageSize int, topic string) *HTTPSessions {
+func (b *Broker) queryAllSessions(keys []string, sessions map[string]*SessionInfo, query bool, page, pageSize int, topic string) *HTTPSessions {
 	res := &HTTPSessions{}
 	if !query {
-		for k := range allSession {
+		for _, k := range keys {
 			httpSession := &HTTPSession{
-				SessionID: strings.TrimPrefix(k, sessionStoreKey("")),
+				SessionID: k,
 			}
 			res.Sessions = append(res.Sessions, httpSession)
 		}
@@ -790,16 +815,14 @@ func (b *Broker) queryAllSessions(allSession map[string]string, query bool, page
 	index := 0
 	start := page*pageSize - pageSize
 	end := page * pageSize
-	for _, v := range allSession {
+	for _, k := range keys {
 		if index >= start && index < end {
-			session := &Session{}
-			session.info = &SessionInfo{}
-			session.decode(v)
-			for k := range session.info.Topics {
-				if strings.Contains(k, topic) {
+			session := sessions[k]
+			for t := range session.Topics {
+				if strings.Contains(t, topic) {
 					httpSession := &HTTPSession{
-						SessionID: session.info.ClientID,
-						Topic:     k,
+						SessionID: session.ClientID,
+						Topic:     t,
 					}
 					res.Sessions = append(res.Sessions, httpSession)
 					break
