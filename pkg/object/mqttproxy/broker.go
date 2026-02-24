@@ -121,9 +121,9 @@ func newBroker(spec *Spec, store storage, muxMapper context.MuxMapper, memberURL
 	}
 
 	broker := &Broker{
-		egName:    spec.EGName,
-		name:      spec.Name,
-		spec:      spec,
+		egName:            spec.EGName,
+		name:              spec.Name,
+		spec:              spec,
 		clients:           make(map[string]*Client),
 		memberURL:         memberURL,
 		done:              make(chan struct{}),
